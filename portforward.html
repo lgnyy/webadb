@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ya-WebADB - 端口转发</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ===== Header (no connect buttons — parent manages connection) ===== -->
+<header class="header frame-header">
+    <span class="frame-label">🔌 端口转发</span>
+    <div class="spacer"></div>
+    <div class="pf-status" id="conn-status">
+        <span class="dot"></span>
+        <span id="conn-status-text">未连接</span>
+    </div>
+</header>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+    <!-- Port Forwarding Tab -->
+    <section class="tab-pane active">
+        <div class="pf-container">
+            <!-- Config Card -->
+            <div class="card pf-config">
+                <div class="fld" id="f-host">
+                    <label>目标主机</label>
+                    <input type="text" id="dest-host" value="127.0.0.1" spellcheck="false">
+                </div>
+                <div class="fld" id="f-port">
+                    <label>目标端口</label>
+                    <input type="text" id="dest-port" value="80" spellcheck="false">
+                </div>
+                <button id="btn-open" class="btn btn-primary">打开连接</button>
+            </div>
+
+            <!-- Connection List -->
+            <div class="conn-list-wrap">
+                <table class="conn-list">
+                    <thead>
+                        <tr>
+                            <th class="cid">#</th>
+                            <th>目标地址</th>
+                            <th class="state">状态</th>
+                            <th class="act">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="conn-list-body"></tbody>
+                </table>
+            </div>
+
+            <!-- IO Area -->
+            <div class="io-area">
+                <!-- Recv Pane -->
+                <div class="pane">
+                    <div class="pane-head">
+                        <span class="recv">▼ 接收数据</span>
+                        <div class="mode-tabs">
+                            <button id="recv-mode-hex" class="active" type="button">HEX</button>
+                            <button id="recv-mode-text" type="button">文本</button>
+                            <button id="recv-clear" type="button" title="清空">清</button>
+                        </div>
+                    </div>
+                    <div class="pane-body">
+                        <textarea id="recv-text" class="io-text" readonly
+                                  placeholder="从设备端口接收到的数据将显示在这里…"></textarea>
+                    </div>
+                </div>
+
+                <!-- Send Pane -->
+                <div class="pane">
+                    <div class="pane-head">
+                        <span class="send">▲ 发送数据</span>
+                        <div class="mode-tabs">
+                            <button id="send-mode-hex" class="active" type="button">HEX</button>
+                            <button id="send-mode-text" type="button">文本</button>
+                        </div>
+                    </div>
+                    <div class="pane-body">
+                        <textarea id="send-text" class="io-text"
+                                  placeholder="输入十六进制（如 48 65 6C 6C 6F）或切换到文本模式…"></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Send Bar -->
+            <div class="send-bar">
+                <button id="btn-send" class="btn btn-primary" type="button" disabled>发送</button>
+                <span class="hint">文本模式自动转换 CRLF；HTTP 请求末尾需空行（按两次回车）</span>
+            </div>
+
+            <!-- Status Bar -->
+            <div class="statusbar">
+                <div class="msg" id="pf-status-msg">就绪</div>
+                <div class="bytes">收: <span id="rx-bytes">0</span> B　发: <span id="tx-bytes">0</span> B</div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<!-- ===== Scripts ===== -->
+<script src="js/portforward.js"></script>
+
+</body>
+</html>

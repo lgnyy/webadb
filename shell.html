@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shell 命令</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<main class="main">
+    <div class="shell-container">
+        <div class="card shell-card">
+            <div class="card-title">
+                <span class="icon">⌨️</span>Shell 命令
+                <button id="clearBtn" class="btn btn-secondary btn-sm" style="margin-left:auto">🗑 清空</button>
+            </div>
+            <div class="command-input-row">
+                <input type="text" id="commandInput" class="command-input"
+                       placeholder="输入命令, 例如: getprop ro.product.model" disabled>
+                <button id="execBtn" class="btn btn-primary" disabled>▶ 执行</button>
+            </div>
+            <div id="output" class="output-area"></div>
+        </div>
+    </div>
+</main>
+
+<script src="js/shell.js"></script>
+</body>
+</html>

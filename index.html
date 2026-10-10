@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ya-WebADB - 浏览器端 ADB 工具</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="app-layout">
+
+<!-- ===== Sidebar (left navigation + connection controls) ===== -->
+<aside class="sidebar">
+    <div class="sidebar-logo">
+        <div class="logo-icon">📱</div>
+        <div class="logo-text">
+            <h1>Ya-WebADB</h1>
+            <span>浏览器端 Android 调试工具</span>
+        </div>
+    </div>
+
+    <div class="sidebar-connect">
+        <button id="connectBtn" class="btn btn-primary btn-sm btn-block">🔌 连接</button>
+        <button id="disconnectBtn" class="btn btn-secondary btn-sm btn-block" disabled>⏏ 断开</button>
+        <div class="device-info" id="deviceStatus">
+            <span class="dot"></span>
+            <span class="status-text" id="deviceStatusText">未连接</span>
+        </div>
+    </div>
+
+    <nav class="sidebar-nav">
+        <button class="nav-item active" data-tab="shell">
+            <span class="nav-icon">💻</span><span class="nav-label">Shell 命令</span>
+        </button>
+        <button class="nav-item" data-tab="tty">
+            <span class="nav-icon">🖥️</span><span class="nav-label">Shell 终端</span>
+        </button>
+        <button class="nav-item" data-tab="portforward">
+            <span class="nav-icon">🔌</span><span class="nav-label">端口转发</span>
+        </button>
+        <button class="nav-item" data-tab="filemgr">
+            <span class="nav-icon">📁</span><span class="nav-label">文件管理</span>
+        </button>
+    </nav>
+</aside>
+
+<!-- ===== Main Content (right side) ===== -->
+<main class="main">
+    <!-- Shell Tab (iframe, shares parent ADB connection) -->
+    <section class="tab-pane active" id="tab-shell">
+        <iframe class="tool-frame" data-src="shell.html" title="Shell 命令"></iframe>
+    </section>
+
+    <!-- Terminal Tab (iframe, shares parent ADB connection) -->
+    <section class="tab-pane" id="tab-tty">
+        <iframe class="tool-frame" data-src="tty.html" title="Shell 终端"></iframe>
+    </section>
+
+    <!-- Port Forward Tab (iframe, shares parent ADB connection) -->
+    <section class="tab-pane" id="tab-portforward">
+        <iframe class="tool-frame" data-src="portforward.html" title="端口转发"></iframe>
+    </section>
+
+    <!-- File Manager Tab (iframe, shares parent ADB connection) -->
+    <section class="tab-pane" id="tab-filemgr">
+        <iframe class="tool-frame" data-src="filemgr.html" title="文件管理"></iframe>
+    </section>
+</main>
+
+<!-- ===== Import Map ===== -->
+<script type="importmap">
+{
+    "imports": {
+        "@yume-chan/adb": "https://esm.sh/@yume-chan/adb?external=@yume-chan/stream-extra",
+        "@yume-chan/adb-credential-web": "https://esm.sh/@yume-chan/adb-credential-web",
+        "@yume-chan/adb-daemon-webusb": "https://esm.sh/@yume-chan/adb-daemon-webusb?external=@yume-chan/stream-extra",
+        "@yume-chan/stream-extra": "https://esm.sh/@yume-chan/stream-extra?bundle=false"
+    }
+}
+</script>
+
+<!-- ===== Scripts ===== -->
+<script type="module" src="js/parent-bridge.js"></script>
+
+<!-- ===== Tab Switching (lazy-load iframes on demand) ===== -->
+<script>
+// 动态加载 iframe：仅在首次切换到某个 tab 时才设置其 src，避免一次性加载全部页面
+function loadTabIframe(tab) {
+    const pane = document.getElementById('tab-' + tab);
+    if (!pane) return;
+    const frame = pane.querySelector('iframe.tool-frame');
+    // 仅当 iframe 尚未设置 src 时才加载（已加载过的保持缓存，切回无需重载）
+    if (frame && !frame.src) {
+        frame.src = frame.dataset.src;
+    }
+}
+
+// 页面加载完成后，立即加载当前激活（默认）tab 的 iframe
+const firstActiveTab = document.querySelector('.nav-item.active');
+if (firstActiveTab) loadTabIframe(firstActiveTab.dataset.tab);
+
+document.querySelectorAll('.nav-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab;
+        document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + tab).classList.add('active');
+        // 切换到该 tab 时按需加载 iframe
+        loadTabIframe(tab);
+    });
+});
+</script>
+
+</body>
+</html>

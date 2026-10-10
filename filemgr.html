@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ya-WebADB - 文件管理</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ===== Frame Header (parent manages connection) ===== -->
+<header class="header frame-header">
+    <span class="frame-label">📁 文件管理</span>
+    <div class="spacer"></div>
+    <div class="pf-status" id="conn-status">
+        <span class="dot"></span>
+        <span id="conn-status-text">未连接</span>
+    </div>
+</header>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+    <section class="tab-pane active">
+        <div class="fm-container">
+            <!-- Toolbar -->
+            <div class="fm-toolbar">
+                <button id="btn-up" class="btn btn-secondary btn-sm" title="上级目录">↑ 上级</button>
+                <button id="btn-refresh" class="btn btn-secondary btn-sm" title="刷新">⟳ 刷新</button>
+                <input id="path-input" class="fm-pathbar-input" type="text" spellcheck="false" value="/sdcard" placeholder="设备路径">
+                <button id="btn-go" class="btn btn-secondary btn-sm" title="跳转">→</button>
+                <button id="btn-mkdir" class="btn btn-secondary btn-sm" title="新建目录" disabled>📁+ 新建</button>
+                <button id="btn-delete" class="btn btn-secondary btn-sm" title="删除选中" disabled>🗑 删除</button>
+                <button id="btn-download" class="btn btn-secondary btn-sm" title="下载选中" disabled>⬇ 下载</button>
+                <button id="btn-upload" class="btn btn-secondary btn-sm" title="上传文件" disabled>⬆ 上传</button>
+                <input id="file-upload" type="file" multiple style="display:none">
+                <button id="btn-upload-dir" class="btn btn-secondary btn-sm" title="上传目录" disabled>📂⬆ 目录</button>
+                <input id="dir-upload" type="file" webkitdirectory multiple style="display:none">
+            </div>
+
+            <!-- File List -->
+            <div class="fm-list-wrap" id="filelist-wrap">
+                <table class="fm-list">
+                    <thead>
+                        <tr>
+                            <th class="icon-col"></th>
+                            <th class="name-col">名称</th>
+                            <th class="size-col">大小</th>
+                            <th class="date-col">修改时间</th>
+                        </tr>
+                    </thead>
+                    <tbody id="filelist-body"></tbody>
+                </table>
+                <div id="empty-state" class="fm-empty" style="display:none">
+                    <div class="big">📂</div>
+                    <div>空目录</div>
+                </div>
+                <div id="loading-state" class="fm-empty" style="display:none">
+                    <div class="big">⏳</div>
+                    <div>正在读取…</div>
+                </div>
+            </div>
+
+            <!-- Progress Overlay -->
+            <div id="progress-overlay" class="fm-progress"></div>
+
+            <!-- Status Bar -->
+            <div class="statusbar">
+                <div class="msg" id="status-msg">就绪</div>
+                <div class="count" id="item-count">0 项</div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<!-- ===== Scripts ===== -->
+<script src="js/filemgr.js"></script>
+
+</body>
+</html>

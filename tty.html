@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ya-WebADB - Shell 终端</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="lib/xterm.css">
+</head>
+<body>
+
+<!-- ===== Header (no connect buttons — parent manages connection) ===== -->
+<header class="header frame-header">
+    <span class="frame-label">🖥️ Shell 终端</span>
+    <div class="spacer"></div>
+    <div class="tty-actions">
+        <button id="startBtn" class="btn btn-primary btn-sm" disabled>▶ 启动终端</button>
+        <button id="stopBtn" class="btn btn-danger btn-sm" disabled>⏹ 断开终端</button>
+    </div>
+    <div class="term-status" id="term-status">未连接</div>
+</header>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+    <div class="tty-container">
+        <div class="terminal-wrap">
+            <div id="terminal-container"></div>
+        </div>
+    </div>
+</main>
+
+<!-- ===== xterm.js (local) ===== -->
+<script src="lib/xterm.js"></script>
+<script src="lib/xterm-addon-fit.js"></script>
+<script src="lib/xterm-addon-web-links.js"></script>
+
+<!-- ===== Terminal Logic ===== -->
+<script src="js/tty.js"></script>
+
+</body>
+</html>
