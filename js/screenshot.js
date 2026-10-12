@@ -16,7 +16,7 @@ const durationInput = document.getElementById('durationInput');
 // ===== State =====
 let connected = false;
 let recording = false;
-let recordMode = null; // 'screenrecord' | 'screencap'
+let recordMode = null; // 'screenrecord' | 'scrcpy' | 'screencap'
 let currentBlob = null;       // 当前预览的 Blob（截图 PNG 或录屏 MP4/WebM）
 let currentMime = '';
 let currentExt = '';
@@ -28,6 +28,13 @@ let recordCtx = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordImg = null;
+
+// scrcpy 录屏模式：H.264 → MP4 封装（mp4-muxer，不重编码）
+let h264Muxer = null;
+let h264Target = null;
+let h264Meta = null;      // 首帧的 decoderConfig（含 avcC description）
+let h264LastPts = null;   // 上一帧 pts（µs），用于计算 duration
+let h264MuxerModPromise = null; // mp4-muxer 模块懒加载
 
 // ===== Helpers =====
 function postToParent(message) {
@@ -216,6 +223,95 @@ function cleanupScreencapRecorder() {
     recordImg = null;
 }
 
+// ===== scrcpy 录屏模式：H.264 → MP4 封装 =====
+function loadMuxerMod() {
+    if (!h264MuxerModPromise) {
+        h264MuxerModPromise = import('https://esm.sh/mp4-muxer@5.2.0?bundle');
+    }
+    return h264MuxerModPromise;
+}
+
+// 收到 configuration 包（SPS/PPS）：初始化 MP4 muxer
+async function initScrcpyMuxer(arrayBuffer) {
+    try {
+        const chunk = new Uint8Array(arrayBuffer);
+        const spsInfo = parseSpsFromConfig(chunk); // h264-utils.js
+        const description = annexbToAvcc(chunk);   // h264-utils.js
+        if (!spsInfo || !description) {
+            log('SPS/PPS 解析失败，无法初始化 MP4 封装', 'err');
+            return;
+        }
+        const { Muxer, ArrayBufferTarget } = await loadMuxerMod();
+        h264Target = new ArrayBufferTarget();
+        h264Muxer = new Muxer({
+            target: h264Target,
+            video: { codec: 'avc', width: spsInfo.width, height: spsInfo.height },
+            fastStart: 'in-memory',
+            firstTimestampBehavior: 'offset', // 首帧 pts 非 0 时自动偏移
+        });
+        h264Meta = { decoderConfig: { codec: spsInfo.codec, description } };
+        h264LastPts = null;
+        log(`MP4 封装已初始化（${spsInfo.width}×${spsInfo.height}）`, 'sys');
+    } catch (e) {
+        log('初始化 MP4 封装失败: ' + e.message, 'err');
+    }
+}
+
+// 收到 H.264 数据帧：写入 muxer
+function writeScrcpyFrame(msg) {
+    if (!h264Muxer || !msg.data) return;
+    try {
+        const chunk = new Uint8Array(msg.data);
+        const avccData = annexbFrameToAvcc(chunk); // h264-utils.js
+        const isKey = msg.keyframe !== undefined ? msg.keyframe : containsNalType(chunk, 5);
+        const pts = (typeof msg.pts === 'number') ? msg.pts : (h264LastPts || 0);
+        // duration = 与上一帧的 pts 差；首帧按 30fps 估算
+        let duration = 33333;
+        if (h264LastPts !== null && pts > h264LastPts) duration = pts - h264LastPts;
+        h264LastPts = pts;
+        const evc = new EncodedVideoChunk({
+            type: isKey ? 'key' : 'delta',
+            timestamp: pts,
+            duration,
+            data: avccData,
+        });
+        if (h264Meta) {
+            h264Muxer.addVideoChunk(evc, h264Meta);
+            h264Meta = null;
+        } else {
+            h264Muxer.addVideoChunk(evc);
+        }
+    } catch (e) {
+        log('写入视频帧失败: ' + e.message, 'err');
+    }
+}
+
+// 停止时：封装并生成 MP4 文件
+function finalizeScrcpyRecording() {
+    if (!h264Muxer) {
+        recStatus.textContent = '未录制到画面';
+        recStatus.className = 'ss-record-status error';
+        log('未收到视频数据，无法生成 MP4', 'err');
+        return;
+    }
+    try {
+        h264Muxer.finalize();
+        const blob = new Blob([h264Target.buffer], { type: 'video/mp4' });
+        showVideoPreview(blob);
+        recStatus.textContent = `已保存 (${(blob.size / 1024 / 1024).toFixed(2)} MB)`;
+        recStatus.className = 'ss-record-status done';
+        log(`MP4 视频封装完成 (${(blob.size / 1024 / 1024).toFixed(2)} MB)`);
+    } catch (e) {
+        recStatus.textContent = '封装失败';
+        recStatus.className = 'ss-record-status error';
+        log('MP4 封装失败: ' + e.message, 'err');
+    }
+    h264Muxer = null;
+    h264Target = null;
+    h264Meta = null;
+    h264LastPts = null;
+}
+
 // ===== Parent Message Handler =====
 window.addEventListener('message', (event) => {
     const data = event.data;
@@ -270,10 +366,33 @@ window.addEventListener('message', (event) => {
                 recStatus.className = 'ss-record-status recording';
                 if (recordMode === 'screenrecord') {
                     log(`录制已开始（screenrecord），文件: ${data.path}`);
+                } else if (recordMode === 'scrcpy') {
+                    log('录制已开始（scrcpy 实时编码模式）');
+                    // 重置 muxer 状态，等待 configuration 包初始化
+                    h264Muxer = null;
+                    h264Target = null;
+                    h264Meta = null;
+                    h264LastPts = null;
                 } else {
                     log('录制已开始（screencap 连续截图模式）');
                     startScreencapRecorder();
                 }
+            }
+            break;
+        }
+
+        case 'record-config': {
+            // scrcpy 模式：SPS/PPS configuration 包，初始化 MP4 muxer
+            if (recordMode === 'scrcpy' && data.data) {
+                initScrcpyMuxer(data.data);
+            }
+            break;
+        }
+
+        case 'record-frame-h264': {
+            // scrcpy 模式：H.264 数据帧，写入 muxer
+            if (recordMode === 'scrcpy') {
+                writeScrcpyFrame(data);
             }
             break;
         }
@@ -317,6 +436,11 @@ window.addEventListener('message', (event) => {
                     // screencap 模式：停止 MediaRecorder，生成 webm
                     recStatus.textContent = '正在合成视频...';
                     stopScreencapRecorder();
+                } else if (recordMode === 'scrcpy') {
+                    // scrcpy 模式：封装 MP4
+                    recStatus.textContent = '正在封装 MP4...';
+                    log('录制已停止，正在封装 MP4...');
+                    finalizeScrcpyRecording();
                 } else {
                     // screenrecord 模式：拉取文件
                     recStatus.textContent = '保存中...';
@@ -330,7 +454,7 @@ window.addEventListener('message', (event) => {
         }
 
         case 'record-stopped':
-            // 录制因达到 time-limit 自动结束
+            // 录制因达到 time-limit 自动结束（或设备断开等异常结束）
             if (recording) {
                 recording = false;
                 recStartBtn.disabled = !connected;
@@ -341,6 +465,9 @@ window.addEventListener('message', (event) => {
                     const pullReqId = Date.now() + Math.random();
                     pendingRequests.set(pullReqId, 'record-pull');
                     postToParent({ type: 'record-pull', path: data.path, reqId: pullReqId });
+                } else if (recordMode === 'scrcpy') {
+                    log('录制已结束，正在封装 MP4...');
+                    finalizeScrcpyRecording();
                 } else {
                     log('录制已自动结束，正在合成视频...');
                     stopScreencapRecorder();

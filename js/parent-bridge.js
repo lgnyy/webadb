@@ -383,14 +383,17 @@ async function handleScreencap(source, reqId) {
 
 // ===== Screen Recording =====
 // 方案A（首选）：设备有 screenrecord 命令 → 执行 screenrecord 写入 /sdcard 文件，停止后拉取
-// 方案B（降级）：设备无 screenrecord → 用 screencap 连续截图，将 PNG 帧发给 iframe，
-//               由 iframe 用 canvas + MediaRecorder 合成为 webm 视频
+// 录屏优先级：screenrecord（设备端编码 MP4）→ scrcpy（服务端 H.264 流转给浏览器封装 MP4）→ screencap（连续截图合成 webm）
 let recordProcess = null;        // screenrecord 进程（方案A）
 let recordPath = null;
-let recordMode = null;           // 'screenrecord' | 'screencap'
-let recordFrameTimer = null;     // screencap 连续截图定时器（方案B）
+let recordMode = null;           // 'screenrecord' | 'scrcpy' | 'screencap'
+let recordFrameTimer = null;     // screencap 连续截图定时器（方案C）
 let recordSource = null;
 let recording = false;
+// scrcpy 录屏状态（方案B）
+let recordScrcpyClient = null;
+let recordScrcpyReader = null;
+let recordScrcpyTimer = null;    // time-limit 自动停止定时器
 
 // 检测设备是否支持 screenrecord
 async function hasScreenrecord(adbDevice) {
@@ -443,6 +446,85 @@ async function screencapLoop() {
     if (recording && recordMode === 'screencap') {
         recordFrameTimer = setTimeout(screencapLoop, 250);
     }
+}
+
+// ===== 方案B：scrcpy 录屏 =====
+// 启动 scrcpy-server（audio=false），将 H.264 视频包转发给 iframe，
+// 由 iframe 用 mp4-muxer 封装为 MP4（不重编码，保画质）。
+async function startScrcpyRecording(source, options) {
+    const adbDevice = getAdbDevice();
+    const { AdbScrcpyClient, AdbScrcpyOptions2_3 } = await import('@yume-chan/adb-scrcpy');
+    const serverPath = '/data/local/tmp/scrcpy-server';
+    await pushScrcpyServer(adbDevice, serverPath);
+
+    const opts = new AdbScrcpyOptions2_3({
+        maxSize: options.maxSize || 1920,
+        bitRate: options.bitRate || 8000000,
+        maxFps: options.maxFps || 30,
+        audio: false, // 录屏不需要音频，也避免占用 socket
+        // 不设置 tunnelForward，使用默认的 reverse tunnel 模式
+    });
+
+    recordScrcpyClient = await withTimeout(AdbScrcpyClient.start(adbDevice, serverPath, opts), 30000, 'record scrcpy start');
+    const wrapper = await recordScrcpyClient.videoStream;
+    const stream = wrapper.stream || wrapper;
+    recordScrcpyReader = stream.getReader();
+    recordMode = 'scrcpy';
+
+    // scrcpy 无内置 time-limit，用定时器实现自动停止
+    const timeLimit = Math.min(Math.max(options.timeLimit || 180, 10), 1800);
+    recordScrcpyTimer = setTimeout(() => {
+        if (recordMode === 'scrcpy' && recording) {
+            console.log('[bridge] scrcpy record time-limit reached, auto stop');
+            stopScrcpyRecording();
+            recording = false;
+            recordMode = null;
+            broadcast({ type: 'record-stopped' });
+        }
+    }, timeLimit * 1000);
+
+    // 读取视频流并转发给 iframe
+    (async () => {
+        try {
+            while (true) {
+                const { value: packet, done } = await recordScrcpyReader.read();
+                if (done) break;
+                if (!packet) continue;
+                if (packet.type === 'configuration') {
+                    const ab = toTransferable(packet.data);
+                    reply(recordSource, { type: 'record-config', data: ab }, [ab]);
+                } else if (packet.type === 'data') {
+                    const ab = toTransferable(packet.data);
+                    reply(recordSource, {
+                        type: 'record-frame-h264',
+                        data: ab,
+                        keyframe: !!packet.keyframe,
+                        pts: packet.pts != null ? Number(packet.pts) : undefined,
+                    }, [ab]);
+                }
+            }
+        } catch (e) {
+            console.warn('[bridge] scrcpy record stream ended:', e.message);
+        } finally {
+            // 流意外结束（设备断开等）：清理并通知 iframe 收尾
+            if (recordScrcpyClient) {
+                stopScrcpyRecording();
+                recording = false;
+                recordMode = null;
+                broadcast({ type: 'record-stopped' });
+            }
+        }
+    })();
+}
+
+function stopScrcpyRecording() {
+    const client = recordScrcpyClient;
+    const reader = recordScrcpyReader;
+    recordScrcpyClient = null;
+    recordScrcpyReader = null;
+    if (recordScrcpyTimer) { clearTimeout(recordScrcpyTimer); recordScrcpyTimer = null; }
+    if (client) { try { client.close(); } catch (e) {} }
+    if (reader) { try { reader.cancel(); } catch (e) {} }
 }
 
 async function handleRecordStart(source, reqId, options = {}) {
@@ -498,19 +580,32 @@ async function handleRecordStart(source, reqId, options = {}) {
             });
 
             reply(source, { type: 'record-result', reqId, mode: 'screenrecord', path: recordPath });
-        } else {
-            // ===== 方案B：screencap 连续截图 =====
-            recordMode = 'screencap';
-            console.log('[bridge] start record (screencap fallback)');
-            reply(source, { type: 'record-result', reqId, mode: 'screencap' });
-            // 启动截图循环
-            screencapLoop();
+            return;
         }
+
+        // ===== 方案B：scrcpy（设备无 screenrecord 时优先，画质远高于 screencap） =====
+        try {
+            console.log('[bridge] start record (scrcpy): screenrecord 不可用，尝试 scrcpy 方案');
+            await startScrcpyRecording(source, options);
+            reply(source, { type: 'record-result', reqId, mode: 'scrcpy' });
+            return;
+        } catch (e) {
+            console.warn('[bridge] scrcpy record failed, fallback to screencap:', e.message);
+            stopScrcpyRecording();
+        }
+
+        // ===== 方案C：screencap 连续截图 =====
+        recordMode = 'screencap';
+        console.log('[bridge] start record (screencap fallback)');
+        reply(source, { type: 'record-result', reqId, mode: 'screencap' });
+        // 启动截图循环
+        screencapLoop();
     } catch (error) {
         console.error('[bridge] record start error:', error);
         recording = false;
         recordMode = null;
         recordProcess = null;
+        stopScrcpyRecording();
         if (recordFrameTimer) { clearTimeout(recordFrameTimer); recordFrameTimer = null; }
         reply(source, { type: 'record-result', reqId, error: error.message });
     }
@@ -531,8 +626,14 @@ async function handleRecordStop(source, reqId) {
             await new Promise(r => setTimeout(r, 500));
             recording = false;
             reply(source, { type: 'record-stop-result', reqId, mode: 'screenrecord', path: recordPath });
+        } else if (recordMode === 'scrcpy') {
+            // 方案B：关闭 scrcpy client，通知 iframe 封装 MP4
+            stopScrcpyRecording();
+            recording = false;
+            recordMode = null;
+            reply(source, { type: 'record-stop-result', reqId, mode: 'scrcpy' });
         } else if (recordMode === 'screencap') {
-            // 方案B：停止截图循环，通知 iframe 合成视频
+            // 方案C：停止截图循环，通知 iframe 合成视频
             recording = false;
             if (recordFrameTimer) { clearTimeout(recordFrameTimer); recordFrameTimer = null; }
             recordMode = null;
@@ -541,6 +642,7 @@ async function handleRecordStop(source, reqId) {
     } catch (error) {
         recording = false;
         recordMode = null;
+        stopScrcpyRecording();
         reply(source, { type: 'record-stop-result', reqId, error: error.message });
     }
 }
@@ -612,6 +714,32 @@ function toDeviceCoords(x, y, videoW, videoH) {
     };
 }
 
+// 推送 scrcpy-server.jar 到设备（投屏与录屏共用）
+async function pushScrcpyServer(adbDevice, serverPath) {
+    try {
+        const serverResp = await fetch('scrcpy-server.jar');
+        const serverBuf = await serverResp.arrayBuffer();
+        const serverBytes = new Uint8Array(serverBuf);
+        const sync = await adbDevice.sync();
+        // 用 ReadableStream 包装数据，供 sync.write 消费
+        let offset = 0;
+        const serverStream = new ReadableStream({
+            pull(controller) {
+                if (offset >= serverBytes.length) {
+                    controller.close();
+                    return;
+                }
+                const chunkSize = Math.min(65536, serverBytes.length - offset);
+                controller.enqueue(serverBytes.subarray(offset, offset + chunkSize));
+                offset += chunkSize;
+            }
+        });
+        await sync.write({ filename: serverPath, file: serverStream });
+    } catch (pushErr) {
+        console.warn('[bridge] push server failed (may already exist):', pushErr.message);
+    }
+}
+
 async function handleScrcpyStart(source, options = {}) {
     const adbDevice = getAdbDevice();
     if (!adbDevice) {
@@ -627,28 +755,7 @@ async function handleScrcpyStart(source, options = {}) {
 
         // 推送 scrcpy-server.jar 到设备
         const serverPath = '/data/local/tmp/scrcpy-server';
-        try {
-            const serverResp = await fetch('scrcpy-server.jar');
-            const serverBuf = await serverResp.arrayBuffer();
-            const serverBytes = new Uint8Array(serverBuf);
-            const sync = await adbDevice.sync();
-            // 用 ReadableStream 包装数据，供 sync.write 消费
-            let offset = 0;
-            const serverStream = new ReadableStream({
-                pull(controller) {
-                    if (offset >= serverBytes.length) {
-                        controller.close();
-                        return;
-                    }
-                    const chunkSize = Math.min(65536, serverBytes.length - offset);
-                    controller.enqueue(serverBytes.subarray(offset, offset + chunkSize));
-                    offset += chunkSize;
-                }
-            });
-            await sync.write({ filename: serverPath, file: serverStream });
-        } catch (pushErr) {
-            console.warn('[bridge] push server failed (may already exist):', pushErr.message);
-        }
+        await pushScrcpyServer(adbDevice, serverPath);
 
         const opts = new AdbScrcpyOptions2_3({
             maxSize: options.maxSize || 1280,

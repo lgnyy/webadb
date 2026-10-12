@@ -115,3 +115,9 @@ postToParent({ type: 'get-device-status' });
 
 appendOutput('[系统] Shell 页面已加载（命令由父页面统一执行）', 'sys');
 appendOutput('[提示] 请先在页面顶部连接设备', 'sys');
+
+appendOutput('SDK 版本：getprop ro.build.version.sdk', 'cmd');
+appendOutput('设备型号：getprop ro.product.model', 'cmd');
+appendOutput('品牌：getprop ro.product.brand', 'cmd');
+appendOutput('CPU 架构：getprop ro.product.cpu.abi', 'cmd');
+appendOutput('序列号：getprop ro.serialno', 'cmd');
