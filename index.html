@@ -40,6 +40,12 @@
         <button class="nav-item" data-tab="filemgr">
             <span class="nav-icon">📁</span><span class="nav-label">文件管理</span>
         </button>
+        <button class="nav-item" data-tab="screenshot">
+            <span class="nav-icon">📸</span><span class="nav-label">截图/录屏</span>
+        </button>
+        <button class="nav-item" data-tab="scrcpy">
+            <span class="nav-icon">📺</span><span class="nav-label">投屏控制</span>
+        </button>
     </nav>
 </aside>
 
@@ -64,6 +70,16 @@
     <section class="tab-pane" id="tab-filemgr">
         <iframe class="tool-frame" data-src="filemgr.html" title="文件管理"></iframe>
     </section>
+
+    <!-- Screenshot & Recording Tab -->
+    <section class="tab-pane" id="tab-screenshot">
+        <iframe class="tool-frame" data-src="screenshot.html?v=2" title="截图/录屏"></iframe>
+    </section>
+
+    <!-- Scrcpy Screen Mirroring Tab -->
+    <section class="tab-pane" id="tab-scrcpy">
+        <iframe class="tool-frame" data-src="scrcpy.html?v=15" title="投屏控制"></iframe>
+    </section>
 </main>
 
 <!-- ===== Import Map ===== -->
@@ -73,13 +89,15 @@
         "@yume-chan/adb": "https://esm.sh/@yume-chan/adb?external=@yume-chan/stream-extra",
         "@yume-chan/adb-credential-web": "https://esm.sh/@yume-chan/adb-credential-web",
         "@yume-chan/adb-daemon-webusb": "https://esm.sh/@yume-chan/adb-daemon-webusb?external=@yume-chan/stream-extra",
-        "@yume-chan/stream-extra": "https://esm.sh/@yume-chan/stream-extra?bundle=false"
+        "@yume-chan/stream-extra": "https://esm.sh/@yume-chan/stream-extra?bundle=false",
+        "@yume-chan/scrcpy": "https://esm.sh/@yume-chan/scrcpy@2.3.0?bundle",
+        "@yume-chan/adb-scrcpy": "https://esm.sh/@yume-chan/adb-scrcpy@2.3.2?bundle"
     }
 }
 </script>
 
 <!-- ===== Scripts ===== -->
-<script type="module" src="js/parent-bridge.js"></script>
+<script type="module" src="js/parent-bridge.js?v=1012"></script>
 
 <!-- ===== Tab Switching (lazy-load iframes on demand) ===== -->
 <script>

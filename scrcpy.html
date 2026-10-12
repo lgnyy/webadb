@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ya-WebADB - 投屏控制</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ===== Header ===== -->
+<header class="header frame-header">
+    <span class="frame-label">📺 投屏控制 (Scrcpy)</span>
+    <div class="spacer"></div>
+    <div class="scrcpy-status" id="scrcpyStatus">未连接</div>
+</header>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+    <div class="scrcpy-container">
+        <!-- 左侧：投屏画面 -->
+        <div class="scrcpy-screen-wrap card">
+            <div class="card-title">
+                <span class="icon">📱</span>设备屏幕
+                <div class="scrcpy-nav-btns" style="margin-left:auto">
+                    <button class="btn btn-secondary btn-sm nav-btn" data-key="home" title="Home">⌂</button>
+                    <button class="btn btn-secondary btn-sm nav-btn" data-key="back" title="Back">◀</button>
+                    <button class="btn btn-secondary btn-sm nav-btn" data-key="appswitch" title="最近任务">▢</button>
+                </div>
+            </div>
+            <div class="scrcpy-screen-area" id="screenArea">
+                <canvas id="screenCanvas"></canvas>
+                <div class="scrcpy-placeholder" id="screenPlaceholder">
+                    <div class="scrcpy-placeholder-icon">📺</div>
+                    <div>点击「开始投屏」显示设备画面</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧：控制面板 -->
+        <div class="scrcpy-controls card">
+            <div class="card-title"><span class="icon">🎛️</span>控制面板</div>
+
+            <div class="scrcpy-section">
+                <div class="scrcpy-section-title">连接</div>
+                <button id="startBtn" class="btn btn-primary btn-block" disabled>▶ 开始投屏</button>
+                <button id="stopBtn" class="btn btn-danger btn-block" disabled>⏹ 停止投屏</button>
+            </div>
+
+            <div class="scrcpy-divider"></div>
+
+            <div class="scrcpy-section">
+                <div class="scrcpy-section-title">视频参数</div>
+                <div class="scrcpy-fields">
+                    <div class="fld">
+                        <label>最大尺寸</label>
+                        <select id="maxSizeSel">
+                            <option value="0">原始</option>
+                            <option value="800">800</option>
+                            <option value="1024">1024</option>
+                            <option value="1280" selected>1280</option>
+                            <option value="1600">1600</option>
+                            <option value="1920">1920</option>
+                        </select>
+                    </div>
+                    <div class="fld">
+                        <label>码率 (Mbps)</label>
+                        <select id="bitrateSel">
+                            <option value="2000000">2</option>
+                            <option value="4000000">4</option>
+                            <option value="8000000" selected>8</option>
+                            <option value="12000000">12</option>
+                            <option value="16000000">16</option>
+                        </select>
+                    </div>
+                    <div class="fld">
+                        <label>帧率</label>
+                        <select id="fpsSel">
+                            <option value="0">不限</option>
+                            <option value="30">30</option>
+                            <option value="60" selected>60</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="scrcpy-hint">参数修改后需重新投屏才生效</div>
+            </div>
+
+            <div class="scrcpy-divider"></div>
+
+            <div class="scrcpy-section">
+                <div class="scrcpy-section-title">文字输入</div>
+                <div class="scrcpy-text-row">
+                    <input type="text" id="textInput" class="scrcpy-text-input" placeholder="输入文字并发送到手机" disabled>
+                    <button id="sendTextBtn" class="btn btn-primary btn-sm" disabled>发送</button>
+                </div>
+            </div>
+
+            <div class="scrcpy-divider"></div>
+
+            <div class="scrcpy-section">
+                <div class="scrcpy-section-title">状态</div>
+                <div class="scrcpy-info" id="scrcpyInfo">
+                    <div>分辨率: <span id="infoRes">-</span></div>
+                    <div>已解码帧: <span id="infoFrames">0</span></div>
+                    <div>延迟: <span id="infoLatency">-</span></div>
+                </div>
+            </div>
+
+            <div class="scrcpy-divider"></div>
+
+            <div class="scrcpy-section">
+                <div class="scrcpy-section-title">操作说明</div>
+                <div class="scrcpy-help">
+                    <div>• 鼠标点击/拖拽 = 触摸操作</div>
+                    <div>• 鼠标滚轮 = 滑动</div>
+                    <div>• 键盘按键 = 手机按键</div>
+                    <div>• 画面上直接输入文字</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</main>
+
+<script src="js/scrcpy.js?v=15"></script>
+</body>
+</html>

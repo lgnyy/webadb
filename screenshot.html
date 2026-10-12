@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ya-WebADB - 截图 / 录屏</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ===== Header ===== -->
+<header class="header frame-header">
+    <span class="frame-label">📸 截图 / 录屏</span>
+    <div class="spacer"></div>
+    <div class="ss-status" id="ss-status">未连接</div>
+</header>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+    <div class="ss-container">
+        <!-- 左侧：操作区 -->
+        <div class="ss-controls card">
+            <div class="card-title"><span class="icon">🎛️</span>操作面板</div>
+
+            <div class="ss-section">
+                <div class="ss-section-title">高清截图</div>
+                <button id="captureBtn" class="btn btn-primary btn-block" disabled>📷 立即截图</button>
+                <div class="ss-hint">获取当前屏幕的 PNG 高清截图</div>
+            </div>
+
+            <div class="ss-divider"></div>
+
+            <div class="ss-section">
+                <div class="ss-section-title">屏幕录制</div>
+                <div class="ss-fields">
+                    <div class="fld">
+                        <label>码率 (Mbps)</label>
+                        <input type="number" id="bitrateInput" value="8" min="1" max="100" step="1">
+                    </div>
+                    <div class="fld">
+                        <label>最长时长 (秒)</label>
+                        <input type="number" id="durationInput" value="1800" min="10" max="1800" step="10">
+                    </div>
+                </div>
+                <div class="ss-record-actions">
+                    <button id="recStartBtn" class="btn btn-primary btn-block" disabled>⏺ 开始录制</button>
+                    <button id="recStopBtn" class="btn btn-danger btn-block" disabled>⏹ 停止并保存</button>
+                </div>
+                <div class="ss-record-status" id="recStatus">就绪</div>
+            </div>
+
+            <div class="ss-divider"></div>
+
+            <div class="ss-section">
+                <div class="ss-section-title">日志</div>
+                <div id="ssLog" class="ss-log"></div>
+            </div>
+        </div>
+
+        <!-- 右侧：预览区 -->
+        <div class="ss-preview card">
+            <div class="card-title">
+                <span class="icon">🖼️</span>预览
+                <button id="downloadBtn" class="btn btn-secondary btn-sm" style="margin-left:auto" disabled>⬇ 下载</button>
+            </div>
+            <div class="ss-preview-area" id="previewArea">
+                <div class="ss-placeholder">
+                    <div class="ss-placeholder-icon">📱</div>
+                    <div>截图或录制的内容将显示在这里</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</main>
+
+<script src="js/screenshot.js?v=2"></script>
+</body>
+</html>

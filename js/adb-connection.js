@@ -27,7 +27,20 @@ export async function connectDevice() {
         throw new Error('浏览器不支持 WebUSB，请使用 Chrome/Edge 并通过 localhost 访问');
     }
 
-    const usbDevice = await manager.requestDevice();
+    // 优先使用已授权设备（无需弹窗），适用于之前已选过设备的场景
+    let usbDevice = null;
+    try {
+        const authorized = await manager.getDevices();
+        // 优先选择 Android 设备（vendorId 常见：4817=华为, 6353=小米, 3725=OPPO, 2821=一加, 2367=vivo 等）
+        // 简单策略：取第一个非 opened 的设备
+        usbDevice = authorized.find(d => !d.opened) || authorized[0] || null;
+    } catch (e) { /* getDevices 可能不支持，忽略 */ }
+
+    // 没有已授权设备时才弹窗让用户选择
+    if (!usbDevice) {
+        usbDevice = await manager.requestDevice();
+    }
+
     if (!usbDevice) {
         throw new Error('用户取消选择设备');
     }
