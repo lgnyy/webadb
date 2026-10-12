@@ -539,9 +539,19 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         if (!running) return;
         const k = btn.dataset.key;
-        if (k === 'home') postToParent({ type: 'scrcpy-key', data: { action: 0, keyCode: 3 } });
-        else if (k === 'back') postToParent({ type: 'scrcpy-back', data: { action: 1 } });
-        else if (k === 'appswitch') postToParent({ type: 'scrcpy-key', data: { action: 0, keyCode: 187 } });
+        if (k === 'home') {
+            // HOME: KEYCODE_HOME=3，需按下+抬起两个动作
+            postToParent({ type: 'scrcpy-key', data: { action: 0, keyCode: 3 } });
+            postToParent({ type: 'scrcpy-key', data: { action: 1, keyCode: 3 } });
+        } else if (k === 'back') {
+            // BACK: backOrScreenOn，需按下+抬起两个动作
+            postToParent({ type: 'scrcpy-back', data: { action: 0 } });
+            postToParent({ type: 'scrcpy-back', data: { action: 1 } });
+        } else if (k === 'appswitch') {
+            // APP_SWITCH: KEYCODE_APP_SWITCH=187，需按下+抬起两个动作
+            postToParent({ type: 'scrcpy-key', data: { action: 0, keyCode: 187 } });
+            postToParent({ type: 'scrcpy-key', data: { action: 1, keyCode: 187 } });
+        }
     });
 });
 
@@ -594,9 +604,13 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'scrcpy-size':
-            videoWidth = data.width;
-            videoHeight = data.height;
-            infoRes.textContent = `${data.width} × ${data.height}`;
+            // 仅在解码器尚未确定视频尺寸时使用（父页面发送的可能是设备物理尺寸，不可靠）
+            // 解码器会从 SPS/帧输出中设置正确的 videoWidth/videoHeight，此处不覆盖
+            if (videoWidth === 0 && videoHeight === 0) {
+                videoWidth = data.width;
+                videoHeight = data.height;
+                infoRes.textContent = `${data.width} × ${data.height}`;
+            }
             break;
 
         case 'error':

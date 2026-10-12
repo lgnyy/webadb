@@ -571,6 +571,46 @@ async function handleRecordPull(source, path, reqId) {
 let scrcpyClient = null;
 let scrcpySource = null;
 let scrcpyVideoReader = null;
+// 设备实际屏幕分辨率（用于 input tap/swipe 坐标转换）
+let deviceScreenWidth = 0;
+let deviceScreenHeight = 0;
+
+async function getDeviceScreenSize() {
+    try {
+        const adbDevice = getAdbDevice();
+        const subprocess = adbDevice?.subprocess;
+        if (!subprocess?.shellProtocol) return;
+        let out = '';
+        if (subprocess.shellProtocol.spawnWaitText) {
+            // spawnWaitText 返回 { exitCode, stdout, stderr } 对象，需取 stdout
+            const result = await withTimeout(subprocess.shellProtocol.spawnWaitText('wm size'), 5000, 'wm size');
+            out = (result && result.stdout) ? result.stdout : (typeof result === 'string' ? result : '');
+        } else {
+            const proc = await withTimeout(subprocess.shellProtocol.spawn('wm size'), 5000, 'wm size');
+            out = await withTimeout(proc.stdout.read(), 3000, 'wm size read') || '';
+        }
+        // 输出格式: "Physical size: 1080x2400" 或 "Override size: ..."
+        // input tap 使用当前显示分辨率，因此优先取 Override size（若存在）
+        let m = out.match(/Override size:\s*(\d+)x(\d+)/);
+        if (!m) m = out.match(/Physical size:\s*(\d+)x(\d+)/);
+        if (m) {
+            deviceScreenWidth = parseInt(m[1], 10);
+            deviceScreenHeight = parseInt(m[2], 10);
+        }
+    } catch (e) {
+        console.warn('[bridge] getDeviceScreenSize failed:', e?.message || e);
+    }
+}
+
+// 将视频流坐标转换为设备实际屏幕坐标
+function toDeviceCoords(x, y, videoW, videoH) {
+    const dw = deviceScreenWidth || videoW;
+    const dh = deviceScreenHeight || videoH;
+    return {
+        x: Math.round(x * dw / videoW),
+        y: Math.round(y * dh / videoH),
+    };
+}
 
 async function handleScrcpyStart(source, options = {}) {
     const adbDevice = getAdbDevice();
@@ -583,11 +623,7 @@ async function handleScrcpyStart(source, options = {}) {
         return;
     }
     try {
-        const mod = await import('@yume-chan/adb-scrcpy');
-        console.log('[bridge] adb-scrcpy module keys:', Object.keys(mod).join(','));
-        console.log('[bridge] AdbScrcpyClient type:', typeof mod.AdbScrcpyClient);
-        const { AdbScrcpyClient, AdbScrcpyOptions2_3 } = mod;
-        console.log('[bridge] AdbScrcpyClient.start type:', typeof AdbScrcpyClient?.start);
+        const { AdbScrcpyClient, AdbScrcpyOptions2_3 } = await import('@yume-chan/adb-scrcpy');
 
         // 推送 scrcpy-server.jar 到设备
         const serverPath = '/data/local/tmp/scrcpy-server';
@@ -610,7 +646,6 @@ async function handleScrcpyStart(source, options = {}) {
                 }
             });
             await sync.write({ filename: serverPath, file: serverStream });
-            console.log('[bridge] scrcpy server pushed to', serverPath);
         } catch (pushErr) {
             console.warn('[bridge] push server failed (may already exist):', pushErr.message);
         }
@@ -619,16 +654,35 @@ async function handleScrcpyStart(source, options = {}) {
             maxSize: options.maxSize || 1280,
             bitRate: options.bitRate || 8000000,
             maxFps: options.maxFps || 60,
+            // 不设置 tunnelForward，使用默认的 reverse tunnel 模式
+            // audio 保持默认（启用），并在下方消费音频流，确保 video→audio→control socket 顺序正确
         });
 
-        console.log('[bridge] scrcpy version:', opts.version);
         scrcpyClient = await withTimeout(AdbScrcpyClient.start(adbDevice, serverPath, opts), 30000, 'AdbScrcpyClient.start');
         scrcpySource = source;
+
+        // 获取设备实际屏幕分辨率，用于 input tap/swipe 坐标转换
+        await getDeviceScreenSize();
 
         // videoStream 是 Promise，await 后是 AdbScrcpyVideoStream，真正的流在 .stream 属性
         const videoStreamWrapper = await scrcpyClient.videoStream;
         const videoStream = videoStreamWrapper.stream || videoStreamWrapper;
         scrcpyVideoReader = videoStream.getReader();
+
+        // 消费音频流（丢弃），确保 audio socket 被正确连接，不阻塞 control socket
+        (async () => {
+            try {
+                const audioStreamWrapper = await scrcpyClient.audioStream;
+                if (audioStreamWrapper) {
+                    const audioStream = audioStreamWrapper.stream || audioStreamWrapper;
+                    const reader = audioStream.getReader();
+                    while (true) {
+                        const { done } = await reader.read();
+                        if (done) break;
+                    }
+                }
+            } catch (e) { /* 音频流读取失败忽略 */ }
+        })();
         (async () => {
             try {
                 while (true) {
@@ -637,14 +691,22 @@ async function handleScrcpyStart(source, options = {}) {
                     if (!packet) continue;
                     // packet 类型: "session" | "configuration" | "data"
                     if (packet.type === 'configuration' || packet.type === 'data') {
+                        // 注意：不向 iframe 发送 scrcpy-size，因为父页面不知道视频流的实际分辨率
+                        // （视频经过 maxSize 缩放，iframe 端的解码器会从 SPS/帧中获取正确的视频尺寸）
+                        // 若发送设备物理尺寸会覆盖 iframe 中解码器设置的正确视频尺寸，导致点击坐标偏移
                         const data = packet.data; // Uint8Array
                         if (data && data.length > 0) {
                             const ab = toTransferable(data);
                             reply(scrcpySource, { type: 'scrcpy-video', data: ab, packetType: packet.type }, [ab]);
                         }
                     } else if (packet.type === 'session') {
-                        // 视频尺寸变化
-                        reply(scrcpySource, { type: 'scrcpy-size', width: packet.width, height: packet.height });
+                        // session 包携带设备物理屏幕尺寸（缩放前），作为 wm size 失败时的回退
+                        const w = scrcpyClient?.screenWidth || packet.width || packet.screenWidth;
+                        const h = scrcpyClient?.screenHeight || packet.height || packet.screenHeight;
+                        if (w && h && !deviceScreenWidth) {
+                            deviceScreenWidth = w;
+                            deviceScreenHeight = h;
+                        }
                     }
                 }
             } catch (e) {
@@ -682,47 +744,139 @@ function handleScrcpyStop() {
     scrcpyClient = null;
     scrcpyVideoReader = null;
     scrcpySource = null;
-    if (reader) { try { reader.cancel(); } catch (e) {} }
+    deviceScreenWidth = 0;
+    deviceScreenHeight = 0;
     if (client) {
-        try { client.close?.(); } catch (e) {}
-        try { client.dispose?.(); } catch (e) {}
+        try { client.close(); } catch (e) {}
+    }
+    if (reader) { try { reader.cancel(); } catch (e) {} }
+    broadcast({ type: 'scrcpy-stopped' });
+}
+
+// scrcpy 控制 socket 在部分设备上不可靠，改用 adb shell input 命令实现所有输入操作
+async function execInputShell(cmd) {
+    try {
+        const adbDevice = getAdbDevice();
+        const subprocess = adbDevice?.subprocess;
+        if (!subprocess?.shellProtocol) return;
+        if (subprocess.shellProtocol.spawnWaitText) {
+            await withTimeout(subprocess.shellProtocol.spawnWaitText(cmd), 5000, 'input shell');
+        } else {
+            const proc = await withTimeout(subprocess.shellProtocol.spawn(cmd), 5000, 'input shell spawn');
+            await proc.exited.catch(() => {});
+        }
+    } catch (e) {
+        console.warn('[bridge] input shell failed:', e?.message || e);
     }
 }
 
-// 统一调用控制消息写入器，兼容不同版本的参数签名
-function writeControl(methodName, ...args) {
-    const writer = scrcpyClient?.controller || scrcpyClient?.controlMessageWriter || scrcpyClient?.controlWriter;
-    if (!writer || typeof writer[methodName] !== 'function') {
-        console.warn(`[bridge] scrcpy control method ${methodName} not available`);
-        return;
-    }
-    try {
-        const p = writer[methodName](...args);
-        if (p && typeof p.then === 'function') p.catch(() => {});
-    } catch (e) {
-        console.warn(`[bridge] ${methodName} error:`, e.message);
-    }
-}
+// 触摸状态跟踪：判断 tap 还是 swipe
+let touchStartPos = null;
 
 function handleScrcpyTouch(data) {
-    // position: { x, y, width, height }
-    writeControl('injectTouch', data.action, data.pointerId, data.position, data.pressure);
-}
-
-function handleScrcpyKey(data) {
-    writeControl('injectKeyCode', data.action, data.keyCode, data.repeat || 0, data.metaState || 0);
+    // scrcpy 控制 socket 在测试设备上写入会永久挂起，因此统一使用 adb shell input
+    const videoW = data.position.width || 1;
+    const videoH = data.position.height || 1;
+    const x = data.position.x;
+    const y = data.position.y;
+    if (data.action === 0) {
+        // ACTION_DOWN: 记录起始位置（视频坐标）
+        touchStartPos = { x, y, videoW, videoH };
+    } else if (data.action === 1) {
+        // ACTION_UP: 判断 tap 或 swipe
+        if (touchStartPos) {
+            const dx = x - touchStartPos.x;
+            const dy = y - touchStartPos.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            // 转换为设备实际坐标
+            const start = toDeviceCoords(touchStartPos.x, touchStartPos.y, touchStartPos.videoW, touchStartPos.videoH);
+            const end = toDeviceCoords(x, y, videoW, videoH);
+            if (dist < 10) {
+                console.log(`[bridge] tap: video(${x},${y}) → device(${end.x},${end.y}) | video=${videoW}x${videoH} device=${deviceScreenWidth}x${deviceScreenHeight}`);
+                execInputShell(`input tap ${end.x} ${end.y}`);
+            } else {
+                console.log(`[bridge] swipe: video(${touchStartPos.x},${touchStartPos.y})→(${x},${y}) device(${start.x},${start.y})→(${end.x},${end.y})`);
+                execInputShell(`input swipe ${start.x} ${start.y} ${end.x} ${end.y} 300`);
+            }
+            touchStartPos = null;
+        }
+    }
+    // ACTION_MOVE 忽略，由 swipe 统一处理
 }
 
 function handleScrcpyScroll(data) {
-    writeControl('injectScroll', data.position, data.hScroll || 0, data.vScroll || 0);
+    // 改用 input swipe 模拟滚动（向上滚 = 内容下移，向下滚 = 内容上移）
+    const videoW = data.position.width || 1;
+    const videoH = data.position.height || 1;
+    const pos = toDeviceCoords(data.position.x, data.position.y, videoW, videoH);
+    const vScroll = data.vScroll || 0;
+    if (vScroll === 0) return;
+    // 滚动距离也需按比例缩放
+    const scale = deviceScreenHeight ? deviceScreenHeight / videoH : 1;
+    const distance = Math.round(100 * scale);
+    if (vScroll > 0) {
+        execInputShell(`input swipe ${pos.x} ${pos.y + distance} ${pos.x} ${pos.y} 200`);
+    } else {
+        execInputShell(`input swipe ${pos.x} ${pos.y} ${pos.x} ${pos.y + distance} 200`);
+    }
 }
 
-function handleScrcpyText(data) {
-    writeControl('injectText', data.text);
+async function execKeyeventShell(keyCode) {
+    try {
+        const adbDevice = getAdbDevice();
+        const subprocess = adbDevice?.subprocess;
+        if (!subprocess) return;
+        const cmd = `input keyevent ${keyCode}`;
+        if (subprocess?.shellProtocol?.spawnWaitText) {
+            await withTimeout(subprocess.shellProtocol.spawnWaitText(cmd), 5000, 'input keyevent');
+            return;
+        }
+        if (subprocess?.shellProtocol) {
+            const proc = await withTimeout(subprocess.shellProtocol.spawn(cmd), 5000, 'input keyevent spawn');
+            await proc.exited.catch(() => {});
+            return;
+        }
+    } catch (e) {
+        console.warn(`[bridge] input keyevent ${keyCode} failed:`, e?.message || e);
+    }
+}
+
+function handleScrcpyKey(data) {
+    // 所有按键都改用 shell 命令注入（scrcpy injectKeyCode 在部分设备上无效/挂起）
+    // 只在 ACTION_UP 时触发一次，避免 down/up 各执行一次
+    if (data.action === 1) {
+        execKeyeventShell(data.keyCode);
+    }
+}
+
+async function handleScrcpyText(data) {
+    // 改用 adb shell input text 注入文字（scrcpy injectText 在部分设备上无效/挂起）
+    // input text 仅支持 ASCII，空格用 %s，特殊字符需转义
+    const text = data.text || '';
+    if (!text) return;
+
+    // 检测是否包含非 ASCII 字符
+    const hasNonAscii = [...text].some(c => c.charCodeAt(0) > 127);
+    if (hasNonAscii) {
+        console.warn('[bridge] input text 不支持非 ASCII 字符（中文等），请使用英文/数字');
+    }
+
+    // 转义：空格 → %s，shell 特殊字符前加 \
+    const escaped = [...text].map(c => {
+        if (c === ' ') return '%s';
+        if ('&|<>;()$`\\"\'!'.includes(c)) return '\\' + c;
+        return c;
+    }).join('');
+
+    await execInputShell(`input text ${escaped}`);
 }
 
 function handleScrcpyBackOrScreenOn(data) {
-    writeControl('backOrScreenOn', data.action || 0);
+    // 与 HOME/APP_SWITCH 一致，改用 shell 命令注入，避免部分设备 scrcpy 注入无效/挂起
+    // back 按钮在 iframe 中发送了 down(0) 和 up(1) 两个动作，这里只在 up 时执行一次
+    if (data.action === 1) {
+        execKeyeventShell(4); // KEYCODE_BACK
+    }
 }
 
 // ===== 清理交互式 shell 输出（去掉命令回显、提示符、exit 行） =====
