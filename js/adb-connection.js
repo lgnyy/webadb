@@ -10,10 +10,11 @@ import { MaybeConsumable } from '@yume-chan/stream-extra';
 // ===== State =====
 let adbDevice = null;
 let activeConnection = null;
-// WiFi（tango-bridge → adb server）模式状态
+// tango-bridge → adb server 模式状态（WiFi 和 USB 桥接共用）
 let adbServerClient = null;
 let wifiConnector = null;
 let wifiSerial = null;
+let bridgeMode = null; // 'wifi' | 'usb' | null
 const listeners = { connected: [], disconnected: [] };
 
 // ===== Event API =====
@@ -23,8 +24,8 @@ export function onDisconnected(fn) { listeners.disconnected.push(fn); }
 // ===== Device API =====
 export function getAdbDevice() { return adbDevice; }
 export function isConnected() { return !!adbDevice; }
-// WiFi（tango-bridge）模式：scrcpy 需用 forward tunnel（adb server 代理，无需本地 TCP 监听）
-export function isWifiMode() { return !!adbServerClient; }
+// 桥接模式（WiFi 或 USB）：scrcpy 需用 forward tunnel（adb server 代理，无需本地 TCP 监听）
+export function isBridgeMode() { return !!adbServerClient; }
 
 // ===== Connect (USB) =====
 export async function connectDevice() {
@@ -237,25 +238,76 @@ export async function connectWifiDevice(wsUrl, address) {
     adbServerClient = client;
     wifiConnector = connector;
     wifiSerial = address;
+    bridgeMode = 'wifi';
     adbDevice = adb;
     listeners.connected.forEach(fn => fn(adb));
     return adb;
 }
 
-// 清理 WiFi（adb server）模式的所有连接并通知断开
+// USB 桥接：通过 tango-bridge → adb server 访问本机已连接的 USB 设备
+// adb server 自动检测 USB 设备，浏览器列出设备并创建 Adb 实例
+export async function connectUsbViaBridge(wsUrl) {
+    if (!wsUrl) throw new Error('请填写 tango-bridge 地址');
+
+    if (!(await checkBridge(wsUrl))) {
+        throw new Error('tango-bridge 未运行，请先启动 tango-bridge.exe');
+    }
+
+    if (adbServerClient) {
+        await disconnectWifi();
+    }
+
+    const connector = new WebSocketServerConnector(wsUrl);
+    const client = new AdbServerClient(connector);
+
+    const devices = await withTimeout(client.getDevices(), 10000, 'getDevices');
+    // USB 设备的 serial 不是 IP:端口 格式，过滤掉 WiFi 设备
+    const usbDevices = devices.filter(d =>
+        !/^\d+\.\d+\.\d+\.\d+:\d+$/.test(d.serial) && d.state === 'device'
+    );
+
+    if (usbDevices.length === 0) {
+        connector.closeAll();
+        const hasUnauth = devices.some(d => !/^\d+\.\d+\.\d+\.\d+:\d+$/.test(d.serial));
+        throw new Error(hasUnauth
+            ? 'USB 设备未授权，请在设备上允许 USB 调试'
+            : '未检测到 USB 设备，请确认已通过 USB 连接并启用 USB 调试');
+    }
+
+    const serial = usbDevices[0].serial;
+    let adb;
+    try {
+        adb = await withTimeout(client.createAdb({ serial }), 15000, 'createAdb');
+    } catch (e) {
+        connector.closeAll();
+        throw e;
+    }
+
+    adbServerClient = client;
+    wifiConnector = connector;
+    wifiSerial = serial;
+    bridgeMode = 'usb';
+    adbDevice = adb;
+    listeners.connected.forEach(fn => fn(adb));
+    return adb;
+}
+
+// 清理桥接模式（WiFi / USB）的所有连接并通知断开
 async function disconnectWifi() {
     const client = adbServerClient;
     const connector = wifiConnector;
     const serial = wifiSerial;
+    const mode = bridgeMode;
     const adb = adbDevice;
     adbServerClient = null;
     wifiConnector = null;
     wifiSerial = null;
+    bridgeMode = null;
     adbDevice = null;
     listeners.disconnected.forEach(fn => fn());
 
-    if (client && serial) {
-        // 通知 adb server 断开与设备的 WiFi 连接（忽略失败）
+    // WiFi 模式通知 adb server 断开无线连接；USB 桥接模式不需要
+    if (client && serial && mode === 'wifi') {
         try { await withTimeout(client.wireless.disconnect(serial), 5000, 'disconnect'); } catch (e) { /* ignore */ }
     }
     try { await adb?.close(); } catch (e) { /* ignore */ }
@@ -282,6 +334,7 @@ export async function disconnectDevice() {
 export function setupConnectionUI(opts = {}) {
     const connectBtn = document.getElementById('connectBtn');
     const connectWifiBtn = document.getElementById('connectWifiBtn');
+    const connectBridgeUsbBtn = document.getElementById('connectBridgeUsbBtn');
     const wsUrlInput = document.getElementById('wsUrlInput');
     const wifiAddrInput = document.getElementById('wifiAddrInput');
     const pairAddrInput = document.getElementById('pairAddrInput');
@@ -300,6 +353,7 @@ export function setupConnectionUI(opts = {}) {
     function setUiState(connected) {
         if (connectBtn) connectBtn.disabled = connected;
         if (connectWifiBtn) connectWifiBtn.disabled = connected;
+        if (connectBridgeUsbBtn) connectBridgeUsbBtn.disabled = connected;
         if (pairWifiBtn) pairWifiBtn.disabled = connected;
         if (disconnectBtn) disconnectBtn.disabled = !connected;
     }
@@ -368,8 +422,25 @@ export function setupConnectionUI(opts = {}) {
         }
     }
 
+    async function doBridgeUsbConnect() {
+        const wsUrl = (wsUrlInput?.value || '').trim();
+        try {
+            setStatus('USB 桥接连接中...');
+            await connectUsbViaBridge(wsUrl);
+            log('[系统] USB 桥接已连接', 'sys');
+            try { localStorage.setItem('webadb.wifiWsUrl', wsUrl); } catch (e) { /* ignore */ }
+        } catch (error) {
+            const msg = error.message || String(error);
+            setStatus('连接失败: ' + msg, 'error');
+            log(`[系统] USB 桥接连接失败: ${msg}`, 'sys');
+        }
+    }
+
     if (connectWifiBtn) {
         connectWifiBtn.addEventListener('click', doWifiConnect);
+    }
+    if (connectBridgeUsbBtn) {
+        connectBridgeUsbBtn.addEventListener('click', doBridgeUsbConnect);
     }
     if (pairWifiBtn) {
         pairWifiBtn.addEventListener('click', doWifiPair);
