@@ -956,16 +956,106 @@ function handleScrcpyKey(data) {
     }
 }
 
+// ===== 中文等非 ASCII 文本输入（yadb 方案） =====
+// 原理：input text 仅支持 ASCII。yadb 通过 app_process 直接调用系统 API 输入任意 Unicode 文本，
+// 无需安装 APK、无需切换输入法。用法：
+//   app_process -Djava.class.path=/data/local/tmp/yadb /data/local/tmp com.ysbing.yadb.Main -keyboard '文本'
+// 参考：https://github.com/ysbing/YADB
+const YADB_REMOTE = '/data/local/tmp/yadb';
+let yadbReady = false;          // 本次会话是否已推送成功
+let yadbPushing = null;         // 推送进行中的 Promise（防止并发推送）
+let unicodeTextQueue = Promise.resolve(); // 串行化中文输入
+
+// 执行 shell 命令并返回 stdout 文本
+async function execShellText(adbDevice, cmd, timeoutMs = 10000) {
+    const subprocess = adbDevice?.subprocess;
+    if (!subprocess?.shellProtocol) throw new Error('设备不支持 shell');
+    if (subprocess.shellProtocol.spawnWaitText) {
+        const result = await withTimeout(subprocess.shellProtocol.spawnWaitText(cmd), timeoutMs, cmd);
+        return (result && result.stdout) ? result.stdout : (typeof result === 'string' ? result : '');
+    }
+    const proc = await withTimeout(subprocess.shellProtocol.spawn(cmd), timeoutMs, cmd + ' spawn');
+    const reader = proc.stdout.getReader();
+    let out = '';
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            out += new TextDecoder().decode(value);
+        }
+    } finally { try { reader.releaseLock(); } catch (e) {} }
+    await proc.exited.catch(() => {});
+    return out;
+}
+
+// 确保 yadb 已推送到设备（未推送则从项目根目录的 yadb 文件推送）
+async function ensureYadb(adbDevice) {
+    if (yadbReady) return;
+    if (!yadbPushing) {
+        yadbPushing = (async () => {
+            // 设备上已存在（/data/local/tmp 重启才清除）则跳过
+            const check = await execShellText(adbDevice, `test -f ${YADB_REMOTE} && echo exists`).catch(() => '');
+            if (check.includes('exists')) { yadbReady = true; return; }
+            console.log('[bridge] 推送 yadb 到设备...');
+            const resp = await fetch('yadb');
+            if (!resp.ok) throw new Error('项目根目录缺少 yadb 文件，无法支持中文输入');
+            const bytes = new Uint8Array(await resp.arrayBuffer());
+            const sync = await adbDevice.sync();
+            let offset = 0;
+            const yadbStream = new ReadableStream({
+                pull(controller) {
+                    if (offset >= bytes.length) { controller.close(); return; }
+                    const n = Math.min(65536, bytes.length - offset);
+                    controller.enqueue(bytes.subarray(offset, offset + n));
+                    offset += n;
+                }
+            });
+            await sync.write({ filename: YADB_REMOTE, file: yadbStream });
+            yadbReady = true;
+            console.log('[bridge] yadb 推送完成');
+        })().finally(() => { yadbPushing = null; });
+    }
+    return yadbPushing;
+}
+
+async function sendUnicodeTextNow(adbDevice, text) {
+    await ensureYadb(adbDevice);
+    // 单引号包裹防注入；文本中的单引号转为 '\'' 序列
+    const escaped = text.replace(/'/g, "'\\''");
+    const out = await execShellText(adbDevice,
+        `app_process -Djava.class.path=${YADB_REMOTE} /data/local/tmp com.ysbing.yadb.Main -keyboard '${escaped}'`,
+        15000);
+    const trimmed = (out || '').trim();
+    if (/Exception|Error|error/i.test(trimmed)) {
+        throw new Error(`yadb 执行失败: ${trimmed}`);
+    }
+}
+
+// 串行执行，避免并发输入交错
+function sendUnicodeText(adbDevice, text) {
+    const p = unicodeTextQueue.then(() => sendUnicodeTextNow(adbDevice, text));
+    unicodeTextQueue = p.catch(() => {});
+    return p;
+}
+
 async function handleScrcpyText(data) {
     // 改用 adb shell input text 注入文字（scrcpy injectText 在部分设备上无效/挂起）
-    // input text 仅支持 ASCII，空格用 %s，特殊字符需转义
+    // input text 仅支持 ASCII；非 ASCII（中文等）走 yadb 方案
     const text = data.text || '';
     if (!text) return;
 
     // 检测是否包含非 ASCII 字符
     const hasNonAscii = [...text].some(c => c.charCodeAt(0) > 127);
     if (hasNonAscii) {
-        console.warn('[bridge] input text 不支持非 ASCII 字符（中文等），请使用英文/数字');
+        const adbDevice = getAdbDevice();
+        if (!adbDevice) return;
+        try {
+            await sendUnicodeText(adbDevice, text);
+            console.log(`[bridge] unicode text sent: "${text}"`);
+        } catch (e) {
+            console.error('[bridge] 中文输入失败:', e.message);
+        }
+        return;
     }
 
     // 转义：空格 → %s，shell 特殊字符前加 \
