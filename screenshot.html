@@ -18,7 +18,21 @@
 <!-- ===== Main Content ===== -->
 <main class="main">
     <div class="ss-container">
-        <!-- 左侧：操作区 -->
+        <!-- 左侧：预览区 -->
+        <div class="ss-preview card">
+            <div class="card-title">
+                <span class="icon">🖼️</span>预览
+                <button id="downloadBtn" class="btn btn-secondary btn-sm" style="margin-left:auto" disabled>⬇ 下载</button>
+            </div>
+            <div class="ss-preview-area" id="previewArea">
+                <div class="ss-placeholder">
+                    <div class="ss-placeholder-icon">📱</div>
+                    <div>截图或录制的内容将显示在这里</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧：操作区 -->
         <div class="ss-controls card">
             <div class="card-title"><span class="icon">🎛️</span>操作面板</div>
 
@@ -54,20 +68,6 @@
             <div class="ss-section">
                 <div class="ss-section-title">日志</div>
                 <div id="ssLog" class="ss-log"></div>
-            </div>
-        </div>
-
-        <!-- 右侧：预览区 -->
-        <div class="ss-preview card">
-            <div class="card-title">
-                <span class="icon">🖼️</span>预览
-                <button id="downloadBtn" class="btn btn-secondary btn-sm" style="margin-left:auto" disabled>⬇ 下载</button>
-            </div>
-            <div class="ss-preview-area" id="previewArea">
-                <div class="ss-placeholder">
-                    <div class="ss-placeholder-icon">📱</div>
-                    <div>截图或录制的内容将显示在这里</div>
-                </div>
             </div>
         </div>
     </div>

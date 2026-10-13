@@ -15,6 +15,8 @@ let adbServerClient = null;
 let wifiConnector = null;
 let wifiSerial = null;
 let bridgeMode = null; // 'wifi' | 'usb' | null
+let bridgeWatchdog = null; // 桥接模式掉线轮询
+let usbDisconnectHandler = null; // USB 直连拔出监听
 const listeners = { connected: [], disconnected: [] };
 
 // ===== Event API =====
@@ -65,6 +67,8 @@ export async function connectDevice() {
     });
 
     adbDevice = new Adb(transport);
+    watchDisconnect(adbDevice);
+    watchUsbUnplug(usbDevice.serial || '');
     listeners.connected.forEach(fn => fn(adbDevice));
     return adbDevice;
 }
@@ -85,6 +89,90 @@ function withTimeout(promise, ms, label = '') {
             (e) => { clearTimeout(timer); reject(e); }
         );
     });
+}
+
+// 把底层错误（WebUSB / adb server / 网络）翻译成用户可读的提示
+export function formatError(e) {
+    const raw = String(e?.message || e);
+    if (/用户取消选择设备/.test(raw)) return raw;
+    if (/NotFoundError|not found|无法找到/i.test(raw)) return '未找到设备，请检查 USB 连接和设备调试开关';
+    if (/SecurityError|permission|denied/i.test(raw)) return '浏览器权限被拒绝，请允许访问 USB 设备';
+    if (/NetworkError|busy|in use/i.test(raw)) return '设备被占用：请关闭 ADB.exe 或其他调试程序后重试';
+    if (/already connected/i.test(raw)) return '设备已连接';
+    if (/Incorrect pairing|pairing code/i.test(raw)) return '配对码错误，请重新输入';
+    if (/Unable to connect to pair|pair service/i.test(raw)) return '无法连接配对服务，请检查配对 IP:端口';
+    if (/Connection refused|ECONNREFUSED/i.test(raw)) {
+        const m = raw.match(/['"]?(\d+\.\d+\.\d+\.\d+:\d+)['"]?/);
+        return `无法连接设备${m ? ' ' + m[1] : ''}（连接被拒绝），请检查地址和网络`;
+    }
+    if (/unauthorized/i.test(raw)) return '设备未授权，请在设备上允许调试授权';
+    if (/offline/i.test(raw)) return '设备已离线，请重新连接';
+    if (/超时: pair/.test(raw)) return '配对超时：请检查配对地址、配对码是否过期';
+    if (/超时: connect/.test(raw)) return '连接超时：请检查设备地址和网络';
+    if (/超时: getDevices|超时: createAdb/.test(raw)) return '桥接服务响应超时，请检查 tango-bridge 是否正常运行';
+    if (/tango-bridge 未运行/.test(raw)) return raw;
+    if (/设备未授权/.test(raw)) return raw;
+    if (/USB 设备未授权/.test(raw)) return raw;
+    if (/未检测到 USB 设备/.test(raw)) return raw;
+    return raw;
+}
+
+// transport.closed 作为补充检测（USB 直拔出时可靠触发）
+function watchDisconnect(adb) {
+    const closed = adb?.transport?.closed;
+    if (!closed || typeof closed.then !== 'function') return;
+    closed.then(() => {
+        // 已被替换（新连接）或已手动断开时跳过
+        if (adbDevice !== adb) return;
+        disconnectDevice().catch(() => {});
+    }).catch(() => {});
+}
+
+// USB 直连拔出检测：navigator.usb disconnect 事件（transport.closed 双保险）
+function watchUsbUnplug(serial) {
+    if (!('usb' in navigator)) return;
+    unwatchUsbUnplug();
+    usbDisconnectHandler = (e) => {
+        const s = e.device?.serialNumber || '';
+        if (!serial || s === serial) {
+            disconnectDevice().catch(() => {});
+        }
+    };
+    navigator.usb.addEventListener('disconnect', usbDisconnectHandler);
+}
+
+function unwatchUsbUnplug() {
+    if (usbDisconnectHandler && 'usb' in navigator) {
+        navigator.usb.removeEventListener('disconnect', usbDisconnectHandler);
+        usbDisconnectHandler = null;
+    }
+}
+
+// 桥接模式掉线检测：轮询 adb server 设备列表。
+// 手机关闭无线调试 / 拔出 USB 后，adb server 会把设备标记 offline 或移除；
+// 轮询连续失败（tango-bridge 退出）也触发断开。
+function startBridgeWatchdog(client, serial) {
+    stopBridgeWatchdog();
+    let failCount = 0;
+    bridgeWatchdog = setInterval(async () => {
+        if (adbServerClient !== client) { stopBridgeWatchdog(); return; }
+        try {
+            const devices = await withTimeout(client.getDevices(), 5000, 'watchdog');
+            failCount = 0;
+            const dev = devices.find(d => d.serial === serial);
+            if (!dev || dev.state !== 'device') {
+                disconnectDevice().catch(() => {});
+            }
+        } catch {
+            if (++failCount >= 2) {
+                disconnectDevice().catch(() => {});
+            }
+        }
+    }, 3000);
+}
+
+function stopBridgeWatchdog() {
+    if (bridgeWatchdog) { clearInterval(bridgeWatchdog); bridgeWatchdog = null; }
 }
 
 // tango-bridge 健康检查：用 WebSocket 连接探测（无 CORS 限制）
@@ -240,6 +328,8 @@ export async function connectWifiDevice(wsUrl, address) {
     wifiSerial = address;
     bridgeMode = 'wifi';
     adbDevice = adb;
+    watchDisconnect(adb);
+    startBridgeWatchdog(client, address);
     listeners.connected.forEach(fn => fn(adb));
     return adb;
 }
@@ -288,12 +378,15 @@ export async function connectUsbViaBridge(wsUrl) {
     wifiSerial = serial;
     bridgeMode = 'usb';
     adbDevice = adb;
+    watchDisconnect(adb);
+    startBridgeWatchdog(client, serial);
     listeners.connected.forEach(fn => fn(adb));
     return adb;
 }
 
 // 清理桥接模式（WiFi / USB）的所有连接并通知断开
 async function disconnectWifi() {
+    stopBridgeWatchdog();
     const client = adbServerClient;
     const connector = wifiConnector;
     const serial = wifiSerial;
@@ -326,6 +419,7 @@ export async function disconnectDevice() {
     }
     activeConnection = null;
     adbDevice = null;
+    unwatchUsbUnplug();
     listeners.disconnected.forEach(fn => fn());
 }
 
@@ -340,6 +434,8 @@ export function setupConnectionUI(opts = {}) {
     const pairAddrInput = document.getElementById('pairAddrInput');
     const pairCodeInput = document.getElementById('pairCodeInput');
     const pairWifiBtn = document.getElementById('pairWifiBtn');
+    const togglePairLink = document.getElementById('togglePairLink');
+    const pairPanel = document.getElementById('pairPanel');
     const disconnectBtn = document.getElementById('disconnectBtn');
     const deviceStatus = document.getElementById('deviceStatus');
     const deviceStatusText = document.getElementById('deviceStatusText');
@@ -358,13 +454,23 @@ export function setupConnectionUI(opts = {}) {
         if (disconnectBtn) disconnectBtn.disabled = !connected;
     }
 
+    let wasConnected = false;
+
     onConnected(() => {
+        wasConnected = true;
         setStatus('已连接', 'connected');
         setUiState(true);
     });
 
     onDisconnected(() => {
-        setStatus('未连接');
+        if (wasConnected) {
+            // 被动断开（拔出/掉线）：给出明确提示
+            wasConnected = false;
+            setStatus('设备已断开', 'error');
+            log('[系统] 设备连接已断开', 'sys');
+        } else {
+            setStatus('未连接');
+        }
         setUiState(false);
     });
 
@@ -376,10 +482,7 @@ export function setupConnectionUI(opts = {}) {
                 await connectDevice();
                 log('[系统] 设备连接成功', 'sys');
             } catch (error) {
-                let msg = error.message;
-                if (msg.includes('busy')) msg = '设备被其他程序占用';
-                if (msg.includes('NotFound')) msg = '未找到设备';
-                if (msg.includes('permission')) msg = '请允许 USB 调试授权';
+                const msg = formatError(error);
                 setStatus(msg, 'error');
                 log(`错误: ${msg}`, 'sys');
                 await disconnectDevice();
@@ -398,7 +501,7 @@ export function setupConnectionUI(opts = {}) {
             log('[系统] 配对成功，可点击 WiFi 连接', 'sys');
             try { localStorage.setItem('webadb.wifiWsUrl', wsUrl); } catch (e) { /* ignore */ }
         } catch (error) {
-            const msg = error.message || String(error);
+            const msg = formatError(error);
             setStatus('配对失败: ' + msg, 'error');
             log(`[系统] 配对失败: ${msg}`, 'sys');
         }
@@ -416,7 +519,7 @@ export function setupConnectionUI(opts = {}) {
                 localStorage.setItem('webadb.wifiAddr', address);
             } catch (e) { /* ignore */ }
         } catch (error) {
-            const msg = error.message || String(error);
+            const msg = formatError(error);
             setStatus('连接失败: ' + msg, 'error');
             log(`[系统] WiFi 连接失败: ${msg}`, 'sys');
         }
@@ -430,7 +533,7 @@ export function setupConnectionUI(opts = {}) {
             log('[系统] USB 桥接已连接', 'sys');
             try { localStorage.setItem('webadb.wifiWsUrl', wsUrl); } catch (e) { /* ignore */ }
         } catch (error) {
-            const msg = error.message || String(error);
+            const msg = formatError(error);
             setStatus('连接失败: ' + msg, 'error');
             log(`[系统] USB 桥接连接失败: ${msg}`, 'sys');
         }
@@ -444,6 +547,14 @@ export function setupConnectionUI(opts = {}) {
     }
     if (pairWifiBtn) {
         pairWifiBtn.addEventListener('click', doWifiPair);
+    }
+    // 配对面板折叠切换
+    if (togglePairLink && pairPanel) {
+        togglePairLink.addEventListener('click', () => {
+            const show = pairPanel.hidden;
+            pairPanel.hidden = !show;
+            togglePairLink.textContent = show ? '收起配对 ∧' : '首次连接？点我配对 ›';
+        });
     }
     // 回车快捷键：地址类输入框触发连接，配对类输入框触发配对
     for (const id of ['wsUrlInput', 'wifiAddrInput']) {
@@ -464,7 +575,10 @@ export function setupConnectionUI(opts = {}) {
     }
 
     if (disconnectBtn) {
-        disconnectBtn.addEventListener('click', disconnectDevice);
+        disconnectBtn.addEventListener('click', () => {
+            wasConnected = false; // 主动断开不提示「设备已断开」
+            disconnectDevice();
+        });
     }
 
     window.addEventListener('beforeunload', disconnectDevice);

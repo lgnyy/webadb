@@ -2,7 +2,7 @@
 // 管理与 iframe 的 postMessage 通信，让终端/端口转发页面共享父页面的唯一 ADB 连接。
 // 采用数据代理方案：父页面持有 ADB 流，通过 postMessage 转发读写数据（不转移流对象）。
 
-import { getAdbDevice, isConnected, isBridgeMode, onConnected, onDisconnected, setupConnectionUI } from './adb-connection.js?v=1065';
+import { getAdbDevice, isConnected, isBridgeMode, onConnected, onDisconnected, setupConnectionUI } from './adb-connection.js?v=1067';
 
 // 绑定主页头部的连接/断开/状态控件
 setupConnectionUI();

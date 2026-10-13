@@ -159,6 +159,35 @@ body.app-layout {
   color: var(--text-muted);
 }
 
+/* Pair panel toggle link & collapsible panel */
+.pair-toggle {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: none;
+  text-align: right;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pair-toggle:hover {
+  color: var(--accent);
+}
+
+.pair-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.pair-panel[hidden] {
+  display: none;
+}
+
 /* Pairing row: code input + pair button side by side */
 .wifi-pair-row {
   display: flex;
