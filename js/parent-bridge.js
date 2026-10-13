@@ -2,7 +2,7 @@
 // 管理与 iframe 的 postMessage 通信，让终端/端口转发页面共享父页面的唯一 ADB 连接。
 // 采用数据代理方案：父页面持有 ADB 流，通过 postMessage 转发读写数据（不转移流对象）。
 
-import { getAdbDevice, isConnected, onConnected, onDisconnected, setupConnectionUI } from './adb-connection.js';
+import { getAdbDevice, isConnected, isWifiMode, onConnected, onDisconnected, setupConnectionUI } from './adb-connection.js?v=1063';
 
 // 绑定主页头部的连接/断开/状态控件
 setupConnectionUI();
@@ -462,7 +462,7 @@ async function startScrcpyRecording(source, options) {
         bitRate: options.bitRate || 8000000,
         maxFps: options.maxFps || 30,
         audio: false, // 录屏不需要音频，也避免占用 socket
-        // 不设置 tunnelForward，使用默认的 reverse tunnel 模式
+        tunnelForward: isWifiMode(),
     });
 
     recordScrcpyClient = await withTimeout(AdbScrcpyClient.start(adbDevice, serverPath, opts), 30000, 'record scrcpy start');
@@ -761,7 +761,9 @@ async function handleScrcpyStart(source, options = {}) {
             maxSize: options.maxSize || 1280,
             bitRate: options.bitRate || 8000000,
             maxFps: options.maxFps || 60,
-            // 不设置 tunnelForward，使用默认的 reverse tunnel 模式
+            // WiFi(tango-bridge)模式用 forward tunnel（adb server 代理直连），
+            // USB 模式用默认 reverse tunnel（设备连回浏览器）
+            tunnelForward: isWifiMode(),
             // audio 保持默认（启用），并在下方消费音频流，确保 video→audio→control socket 顺序正确
         });
 

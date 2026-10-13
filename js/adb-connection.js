@@ -2,13 +2,18 @@
 // 统一管理 WebUSB 设备连接、ADB 认证、设备状态，
 // 供 shell / tty / portforward 三个独立页面共用。
 
-import { Adb, AdbDaemonTransport } from '@yume-chan/adb';
+import { Adb, AdbDaemonTransport, AdbServerClient } from '@yume-chan/adb';
 import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
 import { AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb';
+import { MaybeConsumable } from '@yume-chan/stream-extra';
 
 // ===== State =====
 let adbDevice = null;
 let activeConnection = null;
+// WiFi（tango-bridge → adb server）模式状态
+let adbServerClient = null;
+let wifiConnector = null;
+let wifiSerial = null;
 const listeners = { connected: [], disconnected: [] };
 
 // ===== Event API =====
@@ -18,8 +23,10 @@ export function onDisconnected(fn) { listeners.disconnected.push(fn); }
 // ===== Device API =====
 export function getAdbDevice() { return adbDevice; }
 export function isConnected() { return !!adbDevice; }
+// WiFi（tango-bridge）模式：scrcpy 需用 forward tunnel（adb server 代理，无需本地 TCP 监听）
+export function isWifiMode() { return !!adbServerClient; }
 
-// ===== Connect =====
+// ===== Connect (USB) =====
 export async function connectDevice() {
     const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
 
@@ -61,8 +68,207 @@ export async function connectDevice() {
     return adbDevice;
 }
 
+// ===== Connect (WiFi / WebSocket → adb server) =====
+// 架构：浏览器 → tango-bridge.exe (ws://localhost:15037/bridge/) → PC adb server (127.0.0.1:5037)
+// tango-bridge.exe 是 YAWebADB 官方桥接程序（github.com/tango-adb/bridge-rs），
+// 内置 adb.exe 并自动启动 adb server，WebSocket 端点做纯字节转发到 127.0.0.1:5037。
+// 配对（Android 11+ 无线调试的 6 位配对码）和连接均由 adb server 完成，
+// 浏览器通过 AdbServerClient 下发 pair / connect 命令，之后与 USB 模式共用同一 Adb 接口。
+
+// Promise 超时包装
+function withTimeout(promise, ms, label = '') {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`超时${label ? ': ' + label : ''}`)), ms);
+        Promise.resolve(promise).then(
+            (v) => { clearTimeout(timer); resolve(v); },
+            (e) => { clearTimeout(timer); reject(e); }
+        );
+    });
+}
+
+// tango-bridge 健康检查：用 WebSocket 连接探测（无 CORS 限制）
+async function checkBridge(wsUrl) {
+    return new Promise((resolve) => {
+        const ws = new WebSocket(wsUrl);
+        const timer = setTimeout(() => { try { ws.close(); } catch (e) { /* ignore */ } resolve(false); }, 3000);
+        ws.onopen = () => { clearTimeout(timer); try { ws.close(); } catch (e) { /* ignore */ } resolve(true); };
+        ws.onerror = () => { clearTimeout(timer); resolve(false); };
+    });
+}
+
+// 把 WebSocket 包装成 AdbServerClient 需要的字节双工连接。
+// tango-bridge 对每条 WS 连接建立一条到 adb server 的 TCP 连接，做纯字节转发；
+// adb server 协议每条命令一个连接，因此这里每次 connect() 新建一条 WebSocket。
+class WebSocketServerConnector {
+    #wsUrl;
+    #sockets = new Set();
+
+    constructor(wsUrl) {
+        this.#wsUrl = wsUrl;
+    }
+
+    async connect() {
+        const ws = new WebSocket(this.#wsUrl);
+        ws.binaryType = 'arraybuffer';
+        this.#sockets.add(ws);
+        ws.addEventListener('close', () => this.#sockets.delete(ws));
+
+        await new Promise((resolve, reject) => {
+            const cleanup = () => { ws.onopen = null; ws.onerror = null; ws.onclose = null; };
+            ws.onopen = () => { cleanup(); resolve(); };
+            ws.onerror = () => { cleanup(); reject(new Error(`无法连接 tango-bridge ${this.#wsUrl}`)); };
+            ws.onclose = () => { cleanup(); reject(new Error(`tango-bridge 连接已关闭 ${this.#wsUrl}`)); };
+        });
+
+        let resolveClosed;
+        const closed = new Promise((resolve) => { resolveClosed = resolve; });
+
+        const readable = new ReadableStream({
+            start(controller) {
+                ws.onmessage = (e) => controller.enqueue(new Uint8Array(e.data));
+                ws.onclose = () => { resolveClosed(); try { controller.close(); } catch (e) { /* ignore */ } };
+                ws.onerror = () => { resolveClosed(); try { controller.error(new Error('tango-bridge 连接错误')); } catch (e) { /* ignore */ } };
+            },
+            cancel() { try { ws.close(); } catch (e) { /* ignore */ } },
+        });
+
+        const writable = new MaybeConsumable.WritableStream({
+            write(chunk) {
+                if (ws.readyState !== WebSocket.OPEN) throw new Error('tango-bridge 连接已关闭');
+                ws.send(chunk);
+            },
+            close() { try { ws.close(); } catch (e) { /* ignore */ } },
+            abort() { try { ws.close(); } catch (e) { /* ignore */ } },
+        });
+
+        return {
+            readable,
+            writable,
+            closed,
+            close: async () => { try { ws.close(); } catch (e) { /* ignore */ } await closed; },
+        };
+    }
+
+    closeAll() {
+        for (const ws of this.#sockets) {
+            try { ws.close(); } catch (e) { /* ignore */ }
+        }
+        this.#sockets.clear();
+    }
+
+    // 浏览器无法开 TCP 监听，reverse tunnel 不可用；
+    // WiFi 模式通过 tunnelForward: true 绕过（见 parent-bridge.js）
+    addReverseTunnel() { throw new Error('WiFi (tango-bridge) 模式不支持 reverse 隧道'); }
+    removeReverseTunnel() {}
+    clearReverseTunnels() {}
+}
+
+// 配对（Android 11+ 无线调试）：在设备「开发者选项 → 无线调试 → 使用配对码配对设备」
+// 弹窗中查看配对地址（IP:端口）和 6 位配对码，由 adb server 与设备完成 SPAKE2 握手并保存密钥。
+// 配对成功后即可用无线调试主页面的地址（IP:端口）建立连接。
+export async function pairWifiDevice(wsUrl, pairAddress, pairingCode) {
+    if (!wsUrl) throw new Error('请填写 tango-bridge 地址');
+    if (!pairAddress) throw new Error('请填写配对 IP:端口');
+    const code = String(pairingCode || '').replace(/\s+/g, '');
+    if (!/^\d{6}$/.test(code)) throw new Error('配对码应为 6 位数字');
+
+    // 先检查 tango-bridge 是否运行
+    if (!(await checkBridge(wsUrl))) {
+        throw new Error('tango-bridge 未运行，请先启动 tango-bridge.exe');
+    }
+
+    const connector = new WebSocketServerConnector(wsUrl);
+    const client = new AdbServerClient(connector);
+    try {
+        await withTimeout(client.wireless.pair(pairAddress, code), 20000, 'pair');
+    } finally {
+        connector.closeAll();
+    }
+}
+
+// 连接：adb server 先 connect 设备，再为该设备创建 Adb 实例（与 USB 模式同一接口）
+export async function connectWifiDevice(wsUrl, address) {
+    if (!wsUrl) throw new Error('请填写 tango-bridge 地址');
+    if (!address) throw new Error('请填写设备 IP:端口');
+
+    // 先检查 tango-bridge 是否运行
+    if (!(await checkBridge(wsUrl))) {
+        throw new Error('tango-bridge 未运行，请先启动 tango-bridge.exe');
+    }
+
+    // 已有 WiFi 连接时先清理
+    if (adbServerClient) {
+        await disconnectWifi();
+    }
+
+    const connector = new WebSocketServerConnector(wsUrl);
+    const client = new AdbServerClient(connector);
+    try {
+        await withTimeout(client.wireless.connect(address), 15000, 'connect');
+    } catch (e) {
+        // 设备已连接视为成功
+        if (!(e instanceof AdbServerClient.AlreadyConnectedError) && !/already connected/i.test(String(e?.message))) {
+            connector.closeAll();
+            throw e;
+        }
+    }
+
+    // 检查设备授权状态，避免出现「已连接但所有操作都失败」的假连接
+    try {
+        const devices = await withTimeout(client.getDevices(), 10000, 'getDevices');
+        const dev = devices.find(d => d.serial === address);
+        if (dev && dev.state === 'unauthorized') {
+            connector.closeAll();
+            throw new Error('设备未授权：Android 11+ 无线调试需先完成配对；经典 tcpip 模式请在设备上允许 RSA 授权弹窗后重试');
+        }
+    } catch (e) {
+        if (/设备未授权/.test(String(e?.message))) throw e;
+        // 状态查询失败不阻塞连接
+    }
+
+    let adb;
+    try {
+        adb = await withTimeout(client.createAdb({ serial: address }), 15000, 'createAdb');
+    } catch (e) {
+        connector.closeAll();
+        throw e;
+    }
+
+    adbServerClient = client;
+    wifiConnector = connector;
+    wifiSerial = address;
+    adbDevice = adb;
+    listeners.connected.forEach(fn => fn(adb));
+    return adb;
+}
+
+// 清理 WiFi（adb server）模式的所有连接并通知断开
+async function disconnectWifi() {
+    const client = adbServerClient;
+    const connector = wifiConnector;
+    const serial = wifiSerial;
+    const adb = adbDevice;
+    adbServerClient = null;
+    wifiConnector = null;
+    wifiSerial = null;
+    adbDevice = null;
+    listeners.disconnected.forEach(fn => fn());
+
+    if (client && serial) {
+        // 通知 adb server 断开与设备的 WiFi 连接（忽略失败）
+        try { await withTimeout(client.wireless.disconnect(serial), 5000, 'disconnect'); } catch (e) { /* ignore */ }
+    }
+    try { await adb?.close(); } catch (e) { /* ignore */ }
+    connector?.closeAll();
+}
+
 // ===== Disconnect =====
 export async function disconnectDevice() {
+    // WiFi（adb server）模式：走专用清理流程
+    if (adbServerClient) {
+        await disconnectWifi();
+        return;
+    }
     if (activeConnection?.writable) {
         try { await activeConnection.writable.close(); } catch (e) { /* ignore */ }
     }
@@ -75,6 +281,12 @@ export async function disconnectDevice() {
 // 绑定页面上通用的头部控件：connectBtn / disconnectBtn / deviceStatus / deviceStatusText
 export function setupConnectionUI(opts = {}) {
     const connectBtn = document.getElementById('connectBtn');
+    const connectWifiBtn = document.getElementById('connectWifiBtn');
+    const wsUrlInput = document.getElementById('wsUrlInput');
+    const wifiAddrInput = document.getElementById('wifiAddrInput');
+    const pairAddrInput = document.getElementById('pairAddrInput');
+    const pairCodeInput = document.getElementById('pairCodeInput');
+    const pairWifiBtn = document.getElementById('pairWifiBtn');
     const disconnectBtn = document.getElementById('disconnectBtn');
     const deviceStatus = document.getElementById('deviceStatus');
     const deviceStatusText = document.getElementById('deviceStatusText');
@@ -87,6 +299,8 @@ export function setupConnectionUI(opts = {}) {
 
     function setUiState(connected) {
         if (connectBtn) connectBtn.disabled = connected;
+        if (connectWifiBtn) connectWifiBtn.disabled = connected;
+        if (pairWifiBtn) pairWifiBtn.disabled = connected;
         if (disconnectBtn) disconnectBtn.disabled = !connected;
     }
 
@@ -119,13 +333,79 @@ export function setupConnectionUI(opts = {}) {
         });
     }
 
+    async function doWifiPair() {
+        const wsUrl = (wsUrlInput?.value || '').trim();
+        const pairAddress = (pairAddrInput?.value || '').trim();
+        const code = (pairCodeInput?.value || '').trim();
+        try {
+            setStatus('配对中...');
+            await pairWifiDevice(wsUrl, pairAddress, code);
+            setStatus('配对成功', 'connected');
+            log('[系统] 配对成功，可点击 WiFi 连接', 'sys');
+            try { localStorage.setItem('webadb.wifiWsUrl', wsUrl); } catch (e) { /* ignore */ }
+        } catch (error) {
+            const msg = error.message || String(error);
+            setStatus('配对失败: ' + msg, 'error');
+            log(`[系统] 配对失败: ${msg}`, 'sys');
+        }
+    }
+
+    async function doWifiConnect() {
+        const wsUrl = (wsUrlInput?.value || '').trim();
+        const address = (wifiAddrInput?.value || '').trim();
+        try {
+            setStatus('WiFi 连接中...');
+            await connectWifiDevice(wsUrl, address);
+            log(`[系统] WiFi 已连接: ${address}`, 'sys');
+            try {
+                localStorage.setItem('webadb.wifiWsUrl', wsUrl);
+                localStorage.setItem('webadb.wifiAddr', address);
+            } catch (e) { /* ignore */ }
+        } catch (error) {
+            const msg = error.message || String(error);
+            setStatus('连接失败: ' + msg, 'error');
+            log(`[系统] WiFi 连接失败: ${msg}`, 'sys');
+        }
+    }
+
+    if (connectWifiBtn) {
+        connectWifiBtn.addEventListener('click', doWifiConnect);
+    }
+    if (pairWifiBtn) {
+        pairWifiBtn.addEventListener('click', doWifiPair);
+    }
+    // 回车快捷键：地址类输入框触发连接，配对类输入框触发配对
+    for (const id of ['wsUrlInput', 'wifiAddrInput']) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !connectWifiBtn?.disabled) doWifiConnect();
+            });
+        }
+    }
+    for (const id of ['pairAddrInput', 'pairCodeInput']) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !pairWifiBtn?.disabled) doWifiPair();
+            });
+        }
+    }
+
     if (disconnectBtn) {
         disconnectBtn.addEventListener('click', disconnectDevice);
     }
 
     window.addEventListener('beforeunload', disconnectDevice);
 
-    // init
+    // init：恢复上次使用的 tango-bridge 地址和设备地址
+    try {
+        const savedWs = localStorage.getItem('webadb.wifiWsUrl');
+        const savedAddr = localStorage.getItem('webadb.wifiAddr');
+        if (savedWs && wsUrlInput) wsUrlInput.value = savedWs;
+        if (savedAddr && wifiAddrInput) wifiAddrInput.value = savedAddr;
+    } catch (e) { /* localStorage 不可用时忽略 */ }
+
     setStatus('未连接');
     setUiState(false);
 

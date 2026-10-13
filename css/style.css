@@ -131,6 +131,49 @@ body.app-layout {
   color: var(--text-secondary);
 }
 
+/* WiFi connection section */
+.wifi-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-url-input {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.ws-url-input:focus {
+  border-color: var(--accent);
+}
+
+.ws-url-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Pairing row: code input + pair button side by side */
+.wifi-pair-row {
+  display: flex;
+  gap: 6px;
+}
+
+.wifi-pair-row .ws-url-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wifi-pair-row .btn {
+  flex: 0 0 auto;
+}
+
 /* Sidebar navigation */
 .sidebar-nav {
   flex: 1 1 auto;

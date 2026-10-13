@@ -19,7 +19,17 @@
     </div>
 
     <div class="sidebar-connect">
-        <button id="connectBtn" class="btn btn-primary btn-sm btn-block">🔌 连接</button>
+        <button id="connectBtn" class="btn btn-primary btn-sm btn-block">🔌 USB 连接</button>
+        <div class="wifi-connect">
+            <input type="text" id="wsUrlInput" class="ws-url-input" value="ws://localhost:15037/bridge" placeholder="tango-bridge 地址">
+            <input type="text" id="wifiAddrInput" class="ws-url-input" placeholder="设备 IP:端口（无线调试主页）">
+            <button id="connectWifiBtn" class="btn btn-primary btn-sm btn-block">📶 WiFi 连接</button>
+            <input type="text" id="pairAddrInput" class="ws-url-input" placeholder="配对 IP:端口（配对码页面）">
+            <div class="wifi-pair-row">
+                <input type="text" id="pairCodeInput" class="ws-url-input" placeholder="6 位配对码" maxlength="7" inputmode="numeric">
+                <button id="pairWifiBtn" class="btn btn-secondary btn-sm">🔑 配对</button>
+            </div>
+        </div>
         <button id="disconnectBtn" class="btn btn-secondary btn-sm btn-block" disabled>⏏ 断开</button>
         <div class="device-info" id="deviceStatus">
             <span class="dot"></span>
@@ -97,7 +107,7 @@
 </script>
 
 <!-- ===== Scripts ===== -->
-<script type="module" src="js/parent-bridge.js?v=1056"></script>
+<script type="module" src="js/parent-bridge.js?v=1064"></script>
 
 <!-- ===== Tab Switching (lazy-load iframes on demand) ===== -->
 <script>
